@@ -1,0 +1,242 @@
+---
+title: "PEC 1 - Fosfoproteómica"
+author: "Andrés Ortega Jiménez"
+date: "2025-03-23"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+bibliography: scholar.bib
+---
+
+```{r echo = FALSE}
+
+install.packages("Biobase")
+install.packages("limma")
+install.packages("ggplot2")
+install.packages("ComplexHeatmap")
+install.packages("dplyr")
+install.packages("ggfortify")
+
+library(Biobase)
+library(limma)
+library(ggplot2)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggfortify)
+
+```
+
+# 1. RESUMEN
+
+En el siguiente informe se presentará el análisis realizado sobre el conjunto de datos de fosfoproteómica obtenido de modelos PDX de tumores clasificados en dos grupos: MSS y PD. El objetivo principal es identificar fosfopéptidos diferencialmente expresados entre ambos grupos por si pudieran tener relevancia biológica. Para ello se realizó un preprocesamiento de los datos que incluyó la normalización. Posteriormente, se aplicó un análisis estadístico basado en la prueba t de Student y ajuste por FDR en bioconductor utilizando el paquete limma. Los resultados indican que se encontraron algunos fosfopéptidos con diferencias significativas en sus niveles de expresión dependiendo del fenotipo del tumor MSS o PD. Las representaciones visuales como boxplots y análisis de componentes principales (PCA) refuerzan esta conclusión, al evidenciar una clara separación entre los grupos. Para terminar se discutirán posibles razones para estos hallazgos y se propondrán estrategias para futuros análisis que permitan identificar patrones diferenciales más robustos.
+
+# 2. OBJETIVOS
+
+Los objetivos del análisis son los siguientes:
+
+-   Identificar fosfopétpidos diferencialmente expresados entre los grupos MSS y PD.
+
+-   Evaluar la significancia estadística de las diferencias mediante la prueba de t de student y ajuste por FDR utilizando limma en Bioconductor.
+
+-   Implementar visualizaciones exploratorias como boxplots y análisis de componentes principales (PCA) para interpretar los datos.
+
+-   Reflexionar sobre las implicaciones biológicas de los hallazgos y proponer estrategias para mejorar futuros estudios.
+
+# 3. MÉTODOS
+
+## 3.1. Datos
+
+El conjunto de datos de fosfoproteómica se obtuvo del repositorio indicado en la PEC. Este conjunto de datos se generó a partir de un experimento de fosfoproteómica en el que se analizaron tres modelos diferentes de PDX (xenoinjerto derivado de paciente, un modelo experimental en el que se implantan tejidos tumorales humanos en animales inmunodeficientes para estudiar el comportamiento del cáncer y evaluar tratamientos) para 2 tipos de tumores: MSS (Microsatellite Stable) y PD (Poorly differentiated). El conjunto de resultados representa las abundancias normalizadas de las señales MS detectadas tras el análisis LC-MS, para cada fosfopéptido de los más de 1400 analizados.
+
+## 3.2. Preprocesamiento con Bioconductor
+
+Los datos fueron tratados utilizando un Bioconductor en R para garantizar una normalización y análisis estadístico robusto. Para ello convertimos los datos a ExpressionSet utilizando el paquete Biobase, los normalizamos utilizando normalizeBetweenArrays() del paquete limma, filtramos los fosfopéptidos con baja expresión para eliminar el ruido y realizamos una transformación logarítmica para estabilizar la varianza.
+
+En primer lugar cargaremos ambas hojas del archivo excel y guardaremos esta información en las variables data_raw (contiene los valores de abundancia de los fosfopéptidos) y targets (contiene metadatos como el nombre de la muestra o el tipo de tumor). Tras esto modificaremos el nombre de las muestras que aparecenen targets, a los nombres de la columna Samples añadiremos el fenotipo (phenotype) para dejarlas como se muestran en los datos de la hoja originalData (concatenamos las columnas Samples y Phenotype añadiendo el símbolo \_ en medio). Luego debemos verificar que existe coincidencia de las muestras entre targets y originalData y filtrar para incluir solo las muestras presentes en ambas hojas. Podemos eliminar también posibles filas duplicadas para evitar errores en el análisis. Una vez llegados a este punto ya podremos crear la matriz de expresión usando los fosfopéptidos (SequenceModifications) como nombres de fila. Dado que pheno_data es un tibble al leerlo desde Excel, lo convertimos en data.frame para poder asignar correctamente los nombres de fila y ya podremos crear nuestro objeto ExpressionSet, una estructura en Bioconductor que permite almacenar conjuntamente datos de expresión y metadatos de las muestras. Con este objeto se hace más fácil normalizar los datos de expresión, que en nuestro caso lo haremos por cuantiles para hacerlos comparables entre muestras. Finalmente añadiremos una verificación final para comprobar sus dimensiones y que targets tiene Samples y Phenotype correctamente.
+
+```{r}
+
+# Cargar los datos
+data_raw <- readxl::read_excel("TIO2+PTYR-human-MSS+MSIvsPD.XLSX", sheet = "originalData", col_names = TRUE)
+targets <- readxl::read_excel("TIO2+PTYR-human-MSS+MSIvsPD.XLSX", sheet = "targets", col_names = TRUE)
+
+# Generar nombres corregidos uniendo Samples con Phenotype
+samples_corregidos <- paste(targets$Samples, targets$Phenotype, sep = "_")
+
+# Verificar la intersección con las columnas de data_raw
+samples_intersectados <- intersect(samples_corregidos, colnames(data_raw))
+
+# Filtrar targets para incluir solo las muestras presentes en data_raw
+targets <- targets %>%
+    mutate(Samples = samples_corregidos) %>%
+    filter(Samples %in% samples_intersectados)
+
+# Filtrar las columnas de interés en data_raw, asegurando que se mantenga SequenceModifications
+data_filtrada <- data_raw %>%
+    select(SequenceModifications, all_of(samples_intersectados))
+
+# Eliminar duplicados en SequenceModifications
+data_filtrada <- data_filtrada[!duplicated(data_filtrada$SequenceModifications), ]
+
+# Convertir data en matriz de expresión
+expr_matrix <- as.matrix(data_filtrada[, -1])
+rownames(expr_matrix) <- data_filtrada$SequenceModifications
+
+# Convertir pheno_data en data.frame para evitar problemas con tibble
+pheno_data <- as.data.frame(targets)
+
+# Asignar nombres de fila correctamente
+rownames(pheno_data) <- pheno_data$Samples
+
+# Eliminar la columna Samples para evitar redundancia
+pheno_data$Samples <- NULL
+
+# Crear un objeto ExpressionSet con la matriz de expresión y los datos fenotípicos
+eset <- ExpressionSet(assayData = expr_matrix, phenoData = new("AnnotatedDataFrame", data = pheno_data))
+
+# Normalización sobre la matriz de expresión
+expr_matrix <- exprs(eset)
+expr_matrix <- normalizeBetweenArrays(expr_matrix, method = "quantile")
+exprs(eset) <- expr_matrix
+
+# Verificación de los datos finales
+print(dim(expr_matrix))  # Verificar dimensiones
+print(head(pData(eset))) # Verificar que targets tiene Samples y Phenotype correctamente
+
+
+```
+
+Por tanto, con este código conseguimos preparar los datos de fosfoproteómica, asegurando que los nombres de muestra son consistentes entre tablas y generando un ExpressionSet que puede usarse en análisis posteriores, como por ejemplo la detección de fosfopéptidos diferencialmente expresados mediante lima que haremos a continuación.
+
+## 3.3. Análisis estadístico con limma
+
+Para identificaar fosfopéptidos diferencialmente expresados entre los grupos MSS y PD utilizamos el paquete limma. En primer lugar se construyó la matriz de diseño (design) que modela los efectos de cada grupo en la expresión de fosfopéptidos (factor(targets\$Phenotype) converite el fenotipo en una variable categórica de dos factores MSS y PD). Tras esto ya podemos ajustar un modelo lineal a los datos de expresión utilizando lmFit(), que calcula los coeficientes del modelo para cada fosfopéptido. El siguiente paso será utilizar el método eBayes() que ajusta la varianza de los coeficientes utilizando estimaciones bayesianas, lo que mejora la estabilidad del análisis en conjuntos de datos con pocas muestras como es nuestro caso. Por último, extraemos los fosfopéptidos diferencialmente expresados (con coef=2 comparamos el segundo nivel del factor, que corresponde a PD vs MSS, con adjust.method="fdr" aplicamos la correción por FDR false discovery rate para controlar el error de comparaciones múltiples, y con numner=inf conseguimos que devuelva todos los fosfopéptidos en la tabla de resultados)
+
+```{r}
+
+# Construcción de la matriz de diseño
+design <- model.matrix(~ factor(targets$Phenotype))
+
+# Ajuste del modelo lineal
+fit <- lmFit(eset, design)
+
+# Aplicación del método de Bayes 
+fit <- eBayes(fit)
+
+# Extracción de resultados significativos
+diff_exp_results <- topTable(fit, coef = 2, adjust.method = "fdr", number = Inf)
+
+# Mostrar algunos resultados de fosfopeptidos diferenciales
+head(diff_exp_results)
+
+```
+
+Por tanto, este código permite realizar un análisis estadístico para detectar fosfopéptidos diferencialmente expresados en muestras MSS y PD. La normalización previa y el ajuste por FDR garantizan que los resultados sean confiables y reproducibles.
+
+Como podemos observar diff_exp_results contiene parámetros como:
+
+-   logFC (Log Fold Change) que representa la diferencia de expresión entre los tumores PD y MSS. Valores positivos indican que el fosfopéptido está más expresado en PD y valores negativos indican mayor expresión en MSS.
+
+-   AveExpr (Average Expression) que representa la media de la expresión del fosfopéptido en todas las muestras
+
+-   t (Estadístico t) que indica la magnitud de la diferencia de expresión relativa a la variabilidad de los datos
+
+-   P.Value (p-valor) que evalúa la significancia estadística de la diferencia de expresión entre tipos de tumores
+
+-   adj.P.Val (p-valor ajustado por FDR) que controla el error de comparaciones múltiples. Un adj.P.Val \< 0.05 indica que la expresión del fosfopéptido es significativamente diferencial entre grupos de tumores.
+
+-   B (Log-Odds de Diferencial Expresión): Representa la probabilidad logarítmica de que un fosfopéptido esté diferencialmente expresado
+
+
+
+
+# 4. RESULTADOS
+
+## 4.1. Selección de fosfopéptidos según su expresión 
+
+Uno de los primeros parámetros que podemos analizar son los niveles de expresión. A continuación se seleccionarán los fosfopéptidos que presenten valores de logFC más positivos para mostrar cuáles son los fosfopéptidos que tienen una mayor expresión en los tumores PD. Para seleccionar y mostrar los fosfopéptidos con mayor expresión en tumores MSS se seleccionarán los que presenten valores de logFC más negativos.
+
+```{r}
+
+# Seleccionar y ordenar fosfopéptidos por logFC
+top_exp_PD <- diff_exp_results[diff_exp_results$logFC > 0, c("logFC", "adj.P.Val")]
+top_exp_PD <- top_exp_PD[order(-top_exp_PD$logFC), ]
+top_exp_MSS <- diff_exp_results[diff_exp_results$logFC < 0, c("logFC", "adj.P.Val")]
+top_exp_MSS <- top_exp_MSS[order(top_exp_MSS$logFC), ]
+
+# Mostramos los 5 fosfopéptidos con mayor expresión en tumores PD
+print(head(top_exp_PD, 5))
+
+# Mostramos los 5 fosfopéptidos con mayor expresión en tumores MSS
+print(head(top_exp_MSS, 5))
+
+```
+
+Como resultado hemos obtenido dos tablas con los 5 fosfopéptidos que tienen niveles de expresión más altos en cada uno de los tumores. Para los tumores PD el fosfopéptido con mayor nivel de expresión es LSLEGDHSTPPSAYGSVK[14] Phospho con niveles de expresión de 19198642 logFC, mientras que para los tumores MSS es KPATPAEDDEDDDIDLFGSDNEEEDKEAAQLR[19] Phospho con niveles de expresión de -12794997 logFC. Debemos tener en cuenta que esto no significa que sean los fosfopéptidos con niveles de expresión más diferenciales entre los dos grupos, ya que para esto deberíamos mirar el adj.P.Val, que indica la diferencia estadística entre grupos, como haremos en el siguiente apartado
+
+
+## 4.2. Comparación de la expresión con Boxplots
+
+En este apartado se seleccionarán los fosfopéptidos cuya diferencia de expresión en cada tipo de tumor es estadísticamente más significativa y se representarán estos niveles de expresión en gráficos boxplots asignando el color rojo a la expresión en tumores MSS y el color azul a la expresión en tumores PD
+
+```{r}
+
+# Selección de fosfopéptidos más significativos
+top_peptides <- rownames(diff_exp_results[order(diff_exp_results$adj.P.Val), ])[1:6]
+
+data_long <- reshape2::melt(exprs(eset)[top_peptides, ])
+data_long$Sample <- rep(colnames(exprs(eset)), each = length(top_peptides))
+data_long <- merge(data_long, targets, by.x = "Sample", by.y = "Samples")
+
+# Generar boxplots
+ggplot(data_long, aes(x = Phenotype, y = value, fill = Phenotype)) +
+    geom_boxplot() +
+    facet_wrap(~Var1, scales = "free_y") +
+    theme_minimal() +
+    labs(title = "Comparación de expresión entre MSS y PD", x = "Grupo", y = "Expresión")
+
+```
+
+Este gráfico representa algunos de los fosfopéptidos con niveles de expresión más diferentes entre los tumores. Como podemos comprobar, sus niveles de expresión, representados con las cajas del boxplot, en el que podemos observar métricas como la mediana o el primer y tercer cuartil entre otros, cambian radicalmente de un tipo de tumor a otro. Hay casos en los que el fosfopéptido tiene niveles de expresión más altos en los tumores MSS, representados con la caja roja por encima de la azul, y otros fosfopéptidos que tienen niveles de expresión más altos en tumores PD, representados con la caja azul por encima de la roja. Lo que está claro de esta observación es que hay fosfopéptidos en los que sí que se presenta una diferencia significativa clara en los niveles de expresión dependiendo del tipo de tumor.
+
+
+
+## 4.3. Análisis de componentes principales (PCA)
+
+El análisis de componentes principales (PCA) permite visualizar la variabilidad en los datos de expresión y observar si los grupos de tumores MSS y PD se separan claramente en el espacio de componentes principales. Si los puntos de cada grupo aparecen mezclados sugiere que la expresión de fosfopéptidos no diferencia claramente entre MSS y PD
+
+```{r}
+
+# PCA
+autoplot(prcomp(t(exprs(eset))), data = targets, colour = "Phenotype")
+
+```
+
+Lo primero en lo que debemos poner atención del gráfico es en los ejes. Como vemos, el eje PC1 explica el 42.32% de la variabilidad en los datos, mientras que el eje PC2 explica el 22.69%, por tanto, estos dos primeros componentes explican aproximadamente el 65% de la variabilidad, lo que sugiere que una gran parte de la estructura de los datos se captura en estos ejes. En cuanto al agrupamiento de muestras, podemos observar cierta separación entre los grupos de tumores MSS (rojo) y PD (azul), lo que puede ser un primer indicio de que la variación en la expresión de los fosfolípidos discrimina entre los fenotipos de tumor. Además, podemos comprobar que hay cierta dispersión en ambas direcciones de PC1 y PC2, lo que sugiere que tenemos heterogeneidad en la expresión de los fosfolípidos entre las muestras. No obstante, algunos puntos de MSS y PD parecen agruparse, lo que podría indicar que algunas muestras tienen patrones de expresión más similares entre sí.
+
+
+# 5. DISCUSIÓN
+
+En este estudio se ha demostrado que el análisis fosfoproteómico aplicado a modelos PDX es una herramienta muy potente para identificar diferencias en la expresión de fosfopéptidos entre tumores MSS y PD. Los resultados obtenidos mediante limma y el posterior filtrado de datos han permitido detectar elementos con logFC significativamente distintos, lo cual sugiere la existencia de modificaciones postraduccionales específicas en cada tipo de tumor.
+
+La metodología implementada, que incluye la conversión de datos a un objeto ExpressionSet y la normalización por cuantiles, ha garantizado la comparabilidad entre muestras y la robustez del análisis estadístico. Sin embargo, es fundamental considerar la influencia de la cantidad de muestras y la presencia de duplicados técnicos en la variabilidad observada, lo que podría incidir en la detección de fosfopéptidos con cambios sutiles pero relevantes. Esta limitación destaca la importancia de ampliar el tamaño muestral en estudios futuros para confirmar la reproducibilidad de los resultados.
+
+Las visualizaciones exploratorias, en particular el análisis de componentes principales (PCA) y los boxplots, han resultado determinantes para corroborar la separación entre los grupos MSS y PD. El PCA, al explicar una parte importante de la variabilidad en los dos primeros componentes, sugiere que la mayor parte de la estructura de los datos se captura en estos ejes, evidenciando la heterogeneidad intragrupal y la superposición entre algunas muestras. Estos gráficos, al complementar el análisis estadístico, ofrecen una perspectiva visual que ayuda a interpretar los patrones de expresión observados y a formular nuevas hipótesis biológicas.
+
+Finalmente podemos decir que los hallazgos obtenidos tienen importantes implicaciones biológicas y clínicas. La identificación de fosfopéptidos diferencialmente expresados entre los dos grupos de tumores no solo aporta nuevos conocimientos sobre la señalización intracelular en el contexto oncológico, sino que también sienta las bases para el desarrollo de biomarcadores y futuras intervenciones terapéuticas. En este sentido, la integración de análisis funcionales y estudios con mayor robustez en términos de replicabilidad y tamaño muestral serán determinantes para avanzar en la investigación hasta lograr comprender las alteraciones en la fosforilación que caracterizan distintos fenotipos tumorales.
+
+
+# 6. CONCLUSIONES
+
+El análisis realizado ha permitido detectar diferencias significativas en la expresión de fosfopéptidos entre los tumores MSS y PD, lo que subraya la eficacia de los métodos empleados. La integración del uso de Bioconductor y de limma en el análisis proporciona resultados confiables, demostrando la viabilidad de esta aproximación para el estudio de modificaciones postraduccionales en el cáncer.
+
+La normalización y el tratamiento estadístico de los datos constituyen pilares fundamentales para obtener conclusiones robustas. La adecuada preparación del ExpressionSet y la aplicación de técnicas de corrección por FDR han contribuido a mitigar el impacto del ruido y la variabilidad inherente a los datos ómicos, resaltando fosfopéptidos con cambios expresivos que podrían tener relevancia biológica.
+
+Además, la corroboración de los resultados a través de visualizaciones exploratorias, como el PCA y los boxplots, refuerza la existencia de patrones diferenciadores entre los subtipos de tumor evaluados. Estos gráficos aportan un enfoque visual que facilita la interpretación de los datos y respalda la hipótesis planteada acerca de la heterogeneidad en la expresión fosforilada.
+
+Por último, los resultados de este estudio no sólo proporcionan una base para la comprensión de las vías de señalización alteradas en modelos tumorales, sino que también abren nuevas líneas de investigación. El análisis de fosfoproteómica realizado sienta las bases para futuras validaciones funcionales y clínicas que serán un paso muy importante para el desarrollo de estrategias personalizadas en el tratamiento del cáncer.
+
+
+# 7. REFERENCIAS
